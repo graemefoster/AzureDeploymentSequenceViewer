@@ -4,10 +4,6 @@ param (
     $Subscription,
 
     [Parameter(Mandatory = $true, ParameterSetName = 'ResourceGroup')]
-    [switch]
-    $ResourceGroup,
-
-    [Parameter(Mandatory = $true, ParameterSetName = 'ResourceGroup')]
     [string]
     $ResourceGroupName,
 
@@ -33,7 +29,7 @@ Function _Recurse() {
         $Level
     )
 
-    Write-Host "Recursing into $($DeploymentId) with $($DeploymentOperationsObject.Count) operations"
+    Write-Debug "Recursing into $($DeploymentId) with $($DeploymentOperationsObject.Count) operations"
 
     $deploymentUid = [Guid]::NewGuid().ToString()
     $deploymentInfo = @{
@@ -103,7 +99,7 @@ Function _TraceSubscriptionDeployment {
     )
 
     $indent = New-Object -TypeName 'string' -ArgumentList @("`t", $Level)
-    Write-Host "$($indent)Processing Subscription $($DeploymentId)"
+    Write-Debug "$($indent)Processing Subscription $($DeploymentId)"
 
     #Duration property not exposed on Get-AzDeployment
     $deployment = Get-AzSubscriptionDeployment -DeploymentId $DeploymentId
@@ -121,7 +117,7 @@ Function _TraceResourceGroupDeployment {
     )
 
     $indent = New-Object -TypeName 'string' -ArgumentList @("`t", $Level)
-    Write-Host "$($indent)Processing Resource Group $($DeploymentId)"
+    Write-Debug "$($indent)Processing Resource Group $($DeploymentId)"
 
     #Duration property not exposed on Get-AzDeployment
     $deployment = Get-AzResourceGroupDeployment -Id $DeploymentId
@@ -156,16 +152,17 @@ Function _BuildOpenTelemetryModel {
         }
     }
     else {
-        Write-Host "No parent for $($Deployment.Id)"
+        Write-Debug "No parent for $($Deployment.Id)"
     }
 
     $spans += $currentEntry
 
     foreach ($resource in $Deployment.Resources) {
+        $resourceIdParts = $resource.Id.Split('/')
         $resourceEntry = @{
             traceID       = $TraceId
             spanID        = $Deployment.UId
-            operationName = $resource.Id
+            operationName = [string]::Join('/', $resourceIdParts[4..($resourceIdParts.Count - 1)])
             references    = @(@{
                     refType = "CHILD_OF"
                     traceID = $TraceId
@@ -217,5 +214,5 @@ $openTelemetryLikeModel = @{
 
 ConvertTo-Json -InputObject $openTelemetryLikeModel -Depth 50 | Out-File -FilePath $OutputFile
 
-Write-Host "Output OpenTelemetry-like file to $OutputFile"
+Write-Host "Written output to $OutputFile"
 
