@@ -7,7 +7,7 @@ Connect-AzAccount -Tenant "<tenant>"
 
 Set-AzContext -Subscription "<subscription>
 
-.\Get-DeploymentWaterfall.ps1 -ResourceGroupName <rg-name> -DeploymentName "<deployment-name>" -OutputFile .\deployment-trace.json
+.\Get-DeploymentSequence.ps1 -ResourceGroupName <rg-name> -DeploymentName "<deployment-name>" -OutputFile .\deployment-trace.json
 
 ```
 
