@@ -24,6 +24,7 @@ Function _Recurse() {
         $DeploymentId,
         $Deployment,
         $ParentDeploymentUId,
+        $StartTimeViewedFromParent,
         $DeploymentDuration,
         $DeploymentOperationsObject,
         $Level
@@ -31,14 +32,24 @@ Function _Recurse() {
 
     Write-Debug "Recursing into $($DeploymentId) with $($DeploymentOperationsObject.Count) operations"
 
+    #Run some adjustments - sometimes we grab deployments that happened in the past.
+    $deploymentEndTime = [System.DateTimeOffset]::new($Deployment.Timestamp)
+    $deploymentStartTime = $deploymentEndTime.Add(-$DeploymentDuration)
+    if ($null -ne $StartTimeViewedFromParent) {
+        if ($StartTimeViewedFromParent -gt $deploymentStartTime) {
+            $deploymentStartTime = $StartTimeViewedFromParent
+            $deploymentEndTime = $deploymentStartTime.Add($DeploymentDuration)
+        }
+    }
+
     $deploymentUid = [Guid]::NewGuid().ToString()
     $deploymentInfo = @{
         Id                  = $DeploymentId
         UId                 = $deploymentUid
         ParentDeploymentUId = $ParentDeploymentUId
         Name                = $Deployment.DeploymentName
-        StartTime           = [System.DateTimeOffset]::new($Deployment.Timestamp) - $DeploymentDuration
-        EndTime             = [System.DateTimeOffset]::new($Deployment.Timestamp)
+        StartTime           = $deploymentStartTime
+        EndTime             = $deploymentEndTime
         Duration            = $DeploymentDuration
         ChildDeployments    = @()
         Resources           = @()
@@ -53,35 +64,51 @@ Function _Recurse() {
 
     $DeploymentOperationsObject | ForEach-Object -Parallel {
 
+        $operation = $_
 
         $function:_TraceSubscriptionDeployment = $using:no
         $function:_TraceResourceGroupDeployment = $using:way
         $function:_Recurse = $using:man
 
-        if ($_.TargetResource -like '*Microsoft.Resources/deployments*') {
+        $deploymentStartTime = $using:deploymentStartTime
+        $deploymentUid = $using:deploymentUid
+        $level = $using:Level
+        $allChildDeployments = $using:allChildDeployments
+        $allChildResources = $using:allChildResources
 
-            if ($_.TargetResource -like '*/resourceGroups/*') {
-                $newDeployment = (_TraceResourceGroupDeployment -DeploymentId $_.TargetResource -DeploymentUId $using:deploymentUid -Level ($using:Level + 1))
+    # DEBUGGING
+    # foreach ( $operation in $DeploymentOperationsObject) {
+
+        $operationDetails = (ConvertFrom-Json (Invoke-AzRestMethod "https://management.azure.com$($operation.Id)?api-version=2020-06-01").Content) 
+        $timestamp = [System.DateTimeOffset]::new([System.DateTime]::Parse($operationDetails.properties.timestamp, [System.Globalization.CultureInfo]::CreateSpecificCulture("en-US"), [System.Globalization.DateTimeStyles]::AssumeUniversal))
+        $duration = [System.Xml.XmlConvert]::ToTimeSpan($operationDetails.properties.duration)
+        $operationStartTime = $timestamp.Add(-$duration)
+
+        #Adjust the time on the operation if it reports as before the Deployment Start Time.
+        if ($operationStartTime -lt $deploymentStartTime) {
+            $operationStartTime = $deploymentStartTime
+        }
+
+        if ($operation.TargetResource -like '*Microsoft.Resources/deployments*') {
+            if ($operation.TargetResource -like '*/resourceGroups/*') {
+                $newDeployment = (_TraceResourceGroupDeployment -DeploymentId $operation.TargetResource -DeploymentUId $deploymentUid -OperationTimestamp $operationStartTime -Level ($level + 1))
             }
             else {
-                $newDeployment += (_TraceSubscriptionDeployment -DeploymentId $_.TargetResource -DeploymentUId $using:deploymentUid -Level ($using:Level + 1))
+                $newDeployment += (_TraceSubscriptionDeployment -DeploymentId $operation.TargetResource -DeploymentUId $deploymentUid -OperationTimestamp $operationStartTime -Level ($level + 1))
             } 
 
-            ($using:allChildDeployments).Add($newDeployment)
+            ($allChildDeployments).Add($newDeployment)
 
         }
-        elseif (-not [string]::IsNullOrWhiteSpace($_.TargetResource)) {
-            $operationDetails = (ConvertFrom-Json (Invoke-AzRestMethod "https://management.azure.com$($_.Id)?api-version=2020-06-01").Content) 
-            $timestamp = [System.DateTimeOffset]::new([System.DateTime]::Parse($operationDetails.properties.timestamp, [System.Globalization.CultureInfo]::CreateSpecificCulture("en-US"), [System.Globalization.DateTimeStyles]::AssumeUniversal))
-            $duration = [System.Xml.XmlConvert]::ToTimeSpan($operationDetails.properties.duration)
+        elseif (-not [string]::IsNullOrWhiteSpace($operation.TargetResource)) {
             $newResource = @{
-                Id        = $_.TargetResource
-                StartTime = $timestamp - $duration
+                Id        = $operation.TargetResource
+                StartTime = $operationStartTime
                 EndTime   = $timestamp
                 Duration  = $duration
             }
 
-            ($using:allChildResources).Add($newResource)
+            ($allChildResources).Add($newResource)
         }
     }
 
@@ -95,6 +122,7 @@ Function _TraceSubscriptionDeployment {
     param (
         $DeploymentId,
         $DeploymentUId,
+        $OperationTimestamp,
         $Level
     )
 
@@ -106,13 +134,14 @@ Function _TraceSubscriptionDeployment {
     $deploymentDuration = [System.Xml.XmlConvert]::ToTimeSpan((ConvertFrom-Json (Invoke-AzRestMethod "https://management.azure.com$($DeploymentId)?api-version=2018-01-01").Content).properties.duration)
     $deploymentOperations = Get-AzSubscriptionDeploymentOperation -DeploymentObject $deployment
 
-    return (_Recurse -DeploymentId $DeploymentId -Deployment $deployment -ParentDeploymentUId $DeploymentUId -DeploymentDuration $deploymentDuration -DeploymentOperationsObject $deploymentOperations -Level ($Level + 1))
+    return (_Recurse -DeploymentId $DeploymentId -Deployment $deployment -ParentDeploymentUId $DeploymentUId -StartTimeViewedFromParent $OperationTimestamp -DeploymentDuration $deploymentDuration -DeploymentOperationsObject $deploymentOperations -Level ($Level + 1))
 }
 
 Function _TraceResourceGroupDeployment {
     param (
         $DeploymentId,
         $DeploymentUId,
+        $OperationTimestamp,
         $Level
     )
 
@@ -124,7 +153,7 @@ Function _TraceResourceGroupDeployment {
     $deploymentDuration = [System.Xml.XmlConvert]::ToTimeSpan((ConvertFrom-Json (Invoke-AzRestMethod "https://management.azure.com$($DeploymentId)?api-version=2018-01-01").Content).properties.duration)
     $deploymentOperations = Get-AzResourceGroupDeploymentOperation -DeploymentName $deployment.DeploymentName -ResourceGroupName $deployment.ResourceGroupName
 
-    return (_Recurse -DeploymentId $DeploymentId -Deployment $deployment -ParentDeploymentUId $DeploymentUId -DeploymentDuration $deploymentDuration -DeploymentOperationsObject $deploymentOperations -Level ($Level + 1))
+    return (_Recurse -DeploymentId $DeploymentId -Deployment $deployment -ParentDeploymentUId $DeploymentUId -StartTimeViewedFromParent $OperationTimestamp -DeploymentDuration $deploymentDuration -DeploymentOperationsObject $deploymentOperations -Level ($Level + 1))
 }
 Function _BuildOpenTelemetryModel {
     param (
