@@ -53,6 +53,9 @@ Function _Recurse() {
         Duration            = $DeploymentDuration
         ChildDeployments    = @()
         Resources           = @()
+        ProvisioningState   = $Deployment.ProvisioningState
+        StatusCode          = $Deployment.StatusCode
+        StatusMessage       = $Deployment.StatusMessage
     }
     
     $allChildDeployments = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
@@ -76,8 +79,8 @@ Function _Recurse() {
         $allChildDeployments = $using:allChildDeployments
         $allChildResources = $using:allChildResources
 
-    # DEBUGGING
-    # foreach ( $operation in $DeploymentOperationsObject) {
+        # DEBUGGING
+        # foreach ( $operation in $DeploymentOperationsObject) {
 
         $operationDetails = (ConvertFrom-Json (Invoke-AzRestMethod "https://management.azure.com$($operation.Id)?api-version=2020-06-01").Content) 
         $timestamp = [System.DateTimeOffset]::new([System.DateTime]::Parse($operationDetails.properties.timestamp, [System.Globalization.CultureInfo]::CreateSpecificCulture("en-US"), [System.Globalization.DateTimeStyles]::AssumeUniversal))
@@ -102,10 +105,13 @@ Function _Recurse() {
         }
         elseif (-not [string]::IsNullOrWhiteSpace($operation.TargetResource)) {
             $newResource = @{
-                Id        = $operation.TargetResource
-                StartTime = $operationStartTime
-                EndTime   = $timestamp
-                Duration  = $duration
+                Id            = $operation.TargetResource
+                StartTime     = $operationStartTime
+                EndTime       = $timestamp
+                Duration      = $duration
+                Status        = $operation.ProvisioningState
+                StatusCode    = $operation.StatusCode
+                StatusMessage = $operation.StatusMessage
             }
 
             ($allChildResources).Add($newResource)
@@ -150,6 +156,7 @@ Function _TraceResourceGroupDeployment {
 
     #Duration property not exposed on Get-AzDeployment
     $deployment = Get-AzResourceGroupDeployment -Id $DeploymentId
+
     $deploymentDuration = [System.Xml.XmlConvert]::ToTimeSpan((ConvertFrom-Json (Invoke-AzRestMethod "https://management.azure.com$($DeploymentId)?api-version=2018-01-01").Content).properties.duration)
     $deploymentOperations = Get-AzResourceGroupDeploymentOperation -DeploymentName $deployment.DeploymentName -ResourceGroupName $deployment.ResourceGroupName
 
@@ -172,6 +179,26 @@ Function _BuildOpenTelemetryModel {
         startTime     = $Deployment.StartTime.ToUnixTimeMilliSeconds() * 1000
         duration      = $Deployment.Duration.TotalMilliseconds * 1000
         processID     = "tmp"
+        tags          = @(
+            @{
+                key   = 'error'
+                type  = 'boolean'
+                value = $Deployment.ProvisioningState -eq 'Failed'
+            }
+        )
+        status        = $Deployment.ProvisioningState
+    }
+    if ($Deployment.ProvisioningState -eq 'Failed') {
+        $currentEntry.tags += @{
+            key   = 'statusCode'
+            type  = 'string'
+            value = $Deployment.StatusCode
+        }
+        $currentEntry.tags += @{
+            key   = 'statusMessage'
+            type  = 'string'
+            value = $Deployment.StatusMessage
+        }
     }
     if ($null -ne $Deployment.ParentDeploymentUId) {
         $currentEntry.references += @{
@@ -200,6 +227,25 @@ Function _BuildOpenTelemetryModel {
             startTime     = $resource.StartTime.ToUnixTimeMilliSeconds() * 1000
             duration      = $resource.Duration.TotalMilliseconds * 1000
             processID     = "rsc"
+            tags          = @(
+                @{
+                    key   = 'error'
+                    type  = 'boolean'
+                    value = $resource.ProvisioningState -eq 'Failed'
+                }
+            )
+        }
+        if ($resource.ProvisioningState -eq 'Failed') {
+            $resourceEntry.tags += @{
+                key   = 'statusCode'
+                type  = 'string'
+                value = $resource.StatusCode
+            }
+            $resourceEntry.$tags += @{
+                key   = 'statusMessage'
+                type  = 'string'
+                value = $resource.StatusMessage
+            }
         }
         $spans += $resourceEntry
     }
@@ -213,35 +259,41 @@ Function _BuildOpenTelemetryModel {
     return $spans
 }
 
-$context = (Get-AzContext)
-if ($Subscription -eq $true) {
-    $Deployments = (_TraceSubscriptionDeployment -DeploymentId "/subscriptions/$($context.Subscription.Id)/providers/Microsoft.Resources/deployments/$($DeploymentName)" -Level 0 -DeploymentUId ([Guid]::NewGuid()).ToString())
-}
-else {
-    $Deployments = (_TraceResourceGroupDeployment -DeploymentId "/subscriptions/$($context.Subscription.Id)/resourceGroups/$($ResourceGroupName)/providers/Microsoft.Resources/deployments/$($DeploymentName)" -Level 0 -DeploymentUId ([Guid]::NewGuid()).ToString())
-}
+try {
+    $context = (Get-AzContext)
+    if ($Subscription -eq $true) {
+        $Deployments = (_TraceSubscriptionDeployment -DeploymentId "/subscriptions/$($context.Subscription.Id)/providers/Microsoft.Resources/deployments/$($DeploymentName)" -Level 0 -DeploymentUId ([Guid]::NewGuid()).ToString())
+    }
+    else {
+        $Deployments = (_TraceResourceGroupDeployment -DeploymentId "/subscriptions/$($context.Subscription.Id)/resourceGroups/$($ResourceGroupName)/providers/Microsoft.Resources/deployments/$($DeploymentName)" -Level 0 -DeploymentUId ([Guid]::NewGuid()).ToString())
+    }
 
-$uniqueTraceId = ([Guid]::NewGuid()).ToString()
-$allSpans = (_BuildOpenTelemetryModel -Deployment $Deployments -TraceId $uniqueTraceId)
+    $uniqueTraceId = ([Guid]::NewGuid()).ToString()
+    $allSpans = (_BuildOpenTelemetryModel -Deployment $Deployments -TraceId $uniqueTraceId)
 
-$openTelemetryLikeModel = @{
-    data = @(
-        @{
-            traceID   = $uniqueTraceId
-            spans     = $allSpans
-            processes = @{
-                tmp = @{
-                    serviceName = "template"
-                }
-                rsc = @{
-                    serviceName = "resource"
+    $openTelemetryLikeModel = @{
+        data = @(
+            @{
+                traceID   = $uniqueTraceId
+                spans     = $allSpans
+                processes = @{
+                    tmp = @{
+                        serviceName = "template"
+                    }
+                    rsc = @{
+                        serviceName = "resource"
+                    }
                 }
             }
-        }
-    )
+        )
+    }
+
+    ConvertTo-Json -InputObject $openTelemetryLikeModel -Depth 50 | Out-File -FilePath $OutputFile
+
+    Write-Host "Written output to $OutputFile"
+
 }
-
-ConvertTo-Json -InputObject $openTelemetryLikeModel -Depth 50 | Out-File -FilePath $OutputFile
-
-Write-Host "Written output to $OutputFile"
-
+catch {
+    Write-Output "An error occurred running the script"
+    Write-Output $_
+}
