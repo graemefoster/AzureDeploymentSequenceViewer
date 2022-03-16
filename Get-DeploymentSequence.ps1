@@ -105,13 +105,13 @@ Function _Recurse() {
         }
         elseif (-not [string]::IsNullOrWhiteSpace($operation.TargetResource)) {
             $newResource = @{
-                Id            = $operation.TargetResource
-                StartTime     = $operationStartTime
-                EndTime       = $timestamp
-                Duration      = $duration
-                Status        = $operation.ProvisioningState
-                StatusCode    = $operation.StatusCode
-                StatusMessage = $operation.StatusMessage
+                Id                = $operation.TargetResource
+                StartTime         = $operationStartTime
+                EndTime           = $timestamp
+                Duration          = $duration
+                ProvisioningState = $operation.ProvisioningState
+                StatusCode        = $operation.StatusCode
+                StatusMessage     = $operation.StatusMessage
             }
 
             ($allChildResources).Add($newResource)
@@ -188,18 +188,6 @@ Function _BuildOpenTelemetryModel {
         )
         status        = $Deployment.ProvisioningState
     }
-    if ($Deployment.ProvisioningState -eq 'Failed') {
-        $currentEntry.tags += @{
-            key   = 'statusCode'
-            type  = 'string'
-            value = $Deployment.StatusCode
-        }
-        $currentEntry.tags += @{
-            key   = 'statusMessage'
-            type  = 'string'
-            value = $Deployment.StatusMessage
-        }
-    }
     if ($null -ne $Deployment.ParentDeploymentUId) {
         $currentEntry.references += @{
             refType = "CHILD_OF"
@@ -241,7 +229,7 @@ Function _BuildOpenTelemetryModel {
                 type  = 'string'
                 value = $resource.StatusCode
             }
-            $resourceEntry.$tags += @{
+            $resourceEntry.tags += @{
                 key   = 'statusMessage'
                 type  = 'string'
                 value = $resource.StatusMessage
