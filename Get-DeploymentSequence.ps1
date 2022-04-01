@@ -106,6 +106,7 @@ Function _Recurse() {
         elseif (-not [string]::IsNullOrWhiteSpace($operation.TargetResource)) {
             $newResource = @{
                 Id                = $operation.TargetResource
+                OperationId       = $operation.Id
                 StartTime         = $operationStartTime
                 EndTime           = $timestamp
                 Duration          = $duration
@@ -164,6 +165,7 @@ Function _TraceResourceGroupDeployment {
 }
 Function _BuildOpenTelemetryModel {
     param (
+        $TenantId,
         $Deployment,
         $TraceId
     )
@@ -184,6 +186,11 @@ Function _BuildOpenTelemetryModel {
                 key   = 'error'
                 type  = 'boolean'
                 value = $Deployment.ProvisioningState -eq 'Failed'
+            },
+            @{
+                key   = 'url'
+                type  = 'string'
+                value = "https://portal.azure.com/#blade/HubsExtension/DeploymentDetailsBlade/overview/id/$([System.Uri]::EscapeDataString($Deployment.Id))"
             }
         )
         status        = $Deployment.ProvisioningState
@@ -193,6 +200,7 @@ Function _BuildOpenTelemetryModel {
             refType = "CHILD_OF"
             traceID = $TraceId
             spanID  = $Deployment.ParentDeploymentUId
+            Id      = $Deployment.AzureId
         }
     }
     else {
@@ -202,6 +210,7 @@ Function _BuildOpenTelemetryModel {
     $spans += $currentEntry
 
     foreach ($resource in $Deployment.Resources) {
+
         $resourceIdParts = $resource.Id.Split('/')
         $resourceEntry = @{
             traceID       = $TraceId
@@ -240,7 +249,7 @@ Function _BuildOpenTelemetryModel {
 
     foreach ($deployment in $Deployment.ChildDeployments) {
         if ($null -ne $deployment) {
-            $spans += (_BuildOpenTelemetryModel -Deployment $deployment -TraceId $TraceId)
+            $spans += (_BuildOpenTelemetryModel -Deployment $deployment -TraceId $TraceId -TenantId $TenantId)
         }
     }
 
@@ -257,7 +266,7 @@ try {
     }
 
     $uniqueTraceId = ([Guid]::NewGuid()).ToString()
-    $allSpans = (_BuildOpenTelemetryModel -Deployment $Deployments -TraceId $uniqueTraceId)
+    $allSpans = (_BuildOpenTelemetryModel -Deployment $Deployments -TenantId $context.Tenant.Id -TraceId $uniqueTraceId)
 
     $openTelemetryLikeModel = @{
         data = @(
