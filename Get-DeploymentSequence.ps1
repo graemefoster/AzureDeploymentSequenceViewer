@@ -87,6 +87,7 @@ Function _Recurse() {
         $deploymentStartTime = $using:deploymentStartTime
         $deploymentUid = $using:deploymentUid
         $level = $using:Level
+        $indent = $using:indent
         $allChildDeployments = $using:allChildDeployments
         $allChildResources = $using:allChildResources
         $FirstDeploymentTime = $using:FirstDeploymentTime
@@ -101,7 +102,7 @@ Function _Recurse() {
         
         #Adjust the time on the operation if it reports as before the Deployment Start Time.
         if ($operationStartTime -lt $deploymentStartTime) {
-            Write-Host "$($indent)- :: Correcting operation start-time from reported $($operationStartTime.ToLocalTime().ToString("HH:mm:ss.ffffzzz")) to $($deploymentStartTime.ToLocalTime().ToString("HH:mm:ss.ffffzzz")) ::"
+            Write-Host "$($indent)- :: Operation start-time of $($operation.OperationId) reports before parent deployment start time. Shifting from $($operationStartTime.ToLocalTime().ToString("HH:mm:ss.ffffzzz")) to $($deploymentStartTime.ToLocalTime().ToString("HH:mm:ss.ffffzzz")) ::"
             $operationStartTime = $deploymentStartTime
         }
 
@@ -110,20 +111,44 @@ Function _Recurse() {
             Write-Host "$($indent)- Deployment Operation $($operation.OperationId). Operation Timestamp: $($operationStartTime.ToLocalTime().ToString("HH:mm:ss.ffffzzz"))"
 
             if ($operation.TargetResource -like '*/resourceGroups/*') {
-                $newDeployment = (_TraceResourceGroupDeployment -FirstDeploymentTime $FirstDeploymentTime -DeploymentId $operation.TargetResource -DeploymentUId $deploymentUid -OperationTimestamp $operationStartTime -Level ($level + 1))
+                $deployment = Get-AzResourceGroupDeployment -Id $operation.TargetResource -ErrorAction Continue
+                if ($null -ne $deployment) {
+                    $newDeployment = (_TraceResourceGroupDeployment -FirstDeploymentTime $FirstDeploymentTime -Deployment $deployment -DeploymentId $operation.TargetResource -DeploymentUId $deploymentUid -OperationTimestamp $operationStartTime -Level ($level + 1))
+                }
             }
             else {
-                $newDeployment += (_TraceSubscriptionDeployment -FirstDeploymentTime $FirstDeploymentTime -DeploymentId $operation.TargetResource -DeploymentUId $deploymentUid -OperationTimestamp $operationStartTime -Level ($level + 1))
+                $deployment = Get-AzSubscriptionDeployment -DeploymentId $operation.TargetResource -ErrorAction Continue
+                if ($null -ne $deployment) {
+                    $newDeployment = (_TraceSubscriptionDeployment -FirstDeploymentTime $FirstDeploymentTime -Deployment $deployment -DeploymentId $operation.TargetResource -DeploymentUId $deploymentUid -OperationTimestamp $operationStartTime -Level ($level + 1))
+                }
             } 
+            
+            if ($null -ne $deployment) {
+                ($allChildDeployments).Add($newDeployment)
+            } else {
 
-            ($allChildDeployments).Add($newDeployment)
+                #Not Found the deployment...
+                Write-Host "$($indent)- Failed to find deployment $($operation.TargetResource)"
+                $newResource = @{
+                    Id                = $operation.TargetResource
+                    OperationId       = $operation.Id
+                    StartTime         = $operationStartTime
+                    EndTime           = $timestamp
+                    Duration          = $duration
+                    ProvisioningState = $operation.ProvisioningState
+                    StatusCode        = $operation.StatusCode
+                    StatusMessage     = $operation.StatusMessage
+                }
+    
+                ($allChildResources).Add($newResource)
+            }
 
         }
         elseif (-not [string]::IsNullOrWhiteSpace($operation.TargetResource)) {
 
             $resourceName = $operationDetails.properties.targetResource.resourceName
             $resourceType = $operationDetails.properties.targetResource.resourceType
-            Write-Host "$($indent)- Operation $($resourceType)/$($resourceName). Operation Timestamp: $($operationStartTime.ToLocalTime().ToString("HH:mm:ss.ffffzzz"))"
+            Write-Host "$($indent)- Resource $($resourceType)/$($resourceName). Operation Timestamp: $($operationStartTime.ToLocalTime().ToString("HH:mm:ss.ffffzzz"))"
 
             $newResource = @{
                 Id                = $operation.TargetResource
@@ -149,6 +174,7 @@ Function _Recurse() {
 Function _TraceSubscriptionDeployment {
     param (
         $FirstDeploymentTime,
+        $Deployment,
         $DeploymentId,
         $DeploymentUId,
         $OperationTimestamp,
@@ -159,7 +185,6 @@ Function _TraceSubscriptionDeployment {
     Write-Debug "$($indent)Processing Subscription Deployment $($DeploymentId)"
 
     #Duration property not exposed on Get-AzDeployment
-    $deployment = Get-AzSubscriptionDeployment -DeploymentId $DeploymentId
     $deploymentDuration = [System.Xml.XmlConvert]::ToTimeSpan((ConvertFrom-Json (Invoke-AzRestMethod "https://management.azure.com$($DeploymentId)?api-version=2018-01-01").Content).properties.duration)
     $deploymentOperations = Get-AzSubscriptionDeploymentOperation -DeploymentObject $deployment
 
@@ -169,6 +194,7 @@ Function _TraceSubscriptionDeployment {
 Function _TraceResourceGroupDeployment {
     param (
         $FirstDeploymentTime,
+        $Deployment,
         $DeploymentId,
         $DeploymentUId,
         $OperationTimestamp,
@@ -179,8 +205,6 @@ Function _TraceResourceGroupDeployment {
     Write-Debug "$($indent)Processing Resource Group $($DeploymentId)"
 
     #Duration property not exposed on Get-AzDeployment
-    $deployment = Get-AzResourceGroupDeployment -Id $DeploymentId
-
     $deploymentDuration = [System.Xml.XmlConvert]::ToTimeSpan((ConvertFrom-Json (Invoke-AzRestMethod "https://management.azure.com$($DeploymentId)?api-version=2018-01-01").Content).properties.duration)
     $deploymentOperations = Get-AzResourceGroupDeploymentOperation -DeploymentName $deployment.DeploymentName -ResourceGroupName $deployment.ResourceGroupName
 
@@ -282,10 +306,12 @@ Function _BuildOpenTelemetryModel {
 try {
     $context = (Get-AzContext)
     if ($Subscription -eq $true) {
-        $Deployments = (_TraceSubscriptionDeployment -FirstDeploymentTime $null -DeploymentId "/subscriptions/$($context.Subscription.Id)/providers/Microsoft.Resources/deployments/$($DeploymentName)" -Level 0 -DeploymentUId ([Guid]::NewGuid()).ToString())
+        $deployment = Get-AzSubscriptionDeployment -DeploymentId "/subscriptions/$($context.Subscription.Id)/providers/Microsoft.Resources/deployments/$($DeploymentName)" -ErrorAction Continue
+        $Deployments = (_TraceSubscriptionDeployment -FirstDeploymentTime $null -Deployment $deployment -DeploymentId $deployment.Id -Level 0 -DeploymentUId ([Guid]::NewGuid()).ToString())
     }
     else {
-        $Deployments = (_TraceResourceGroupDeployment -DeploymentId "/subscriptions/$($context.Subscription.Id)/resourceGroups/$($ResourceGroupName)/providers/Microsoft.Resources/deployments/$($DeploymentName)" -Level 0 -DeploymentUId ([Guid]::NewGuid()).ToString())
+        $deployment = Get-AzResourceGroupDeployment -Id $"/subscriptions/$($context.Subscription.Id)/resourceGroups/$($ResourceGroupName)/providers/Microsoft.Resources/deployments/$($DeploymentName)" -ErrorAction Continue
+        $Deployments = (_TraceResourceGroupDeployment -Deployment $deployment -DeploymentId $deployment.Id -Level 0 -DeploymentUId ([Guid]::NewGuid()).ToString())
     }
 
     $uniqueTraceId = ([Guid]::NewGuid()).ToString()
