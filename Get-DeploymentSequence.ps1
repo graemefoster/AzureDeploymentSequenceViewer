@@ -344,8 +344,9 @@ try {
         $Deployments = (_TraceSubscriptionDeployment -FirstDeploymentTime $null -OperationTimestamp $null -Deployment $deployment -DeploymentId $deployment.Id -Level 0 -DeploymentUId ([Guid]::NewGuid()).ToString())
     }
     else {
-        $deployment = Get-AzResourceGroupDeployment -Id $"/subscriptions/$($context.Subscription.Id)/resourceGroups/$($ResourceGroupName)/providers/Microsoft.Resources/deployments/$($DeploymentName)" -ErrorAction Continue
-        $Deployments = (_TraceResourceGroupDeployment -FirstDeploymentTime $null -OperationTimestamp $null -Deployment $deployment -DeploymentId $deployment.Id -Level 0 -DeploymentUId ([Guid]::NewGuid()).ToString())
+        $deploymentId = "/subscriptions/$($context.Subscription.Id)/resourceGroups/$($ResourceGroupName)/providers/Microsoft.Resources/deployments/$($DeploymentName)"
+        $deployment = Get-AzResourceGroupDeployment -Id $deploymentId -ErrorAction Continue
+        $Deployments = (_TraceResourceGroupDeployment -FirstDeploymentTime $null -OperationTimestamp $null -Deployment $deployment -DeploymentId $deploymentId -Level 0 -DeploymentUId ([Guid]::NewGuid()).ToString())
     }
 
     $uniqueTraceId = ([Guid]::NewGuid()).ToString()
