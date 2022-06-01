@@ -1,4 +1,5 @@
 param (
+
     [Parameter(Mandatory = $true, ParameterSetName = 'Subscription')]
     [switch]
     $Subscription,
@@ -15,7 +16,10 @@ param (
     [Parameter(Mandatory = $true, ParameterSetName = 'ResourceGroup')]
     [Parameter(Mandatory = $true, ParameterSetName = 'Subscription')]
     [string]
-    $OutputFile
+    $OutputFile,
+    
+    [switch]
+    $OutputSimple
     
 )
 
@@ -337,6 +341,35 @@ Function _BuildOpenTelemetryModel {
     return $spans
 }
 
+Function _BuildSimpleTextModel {
+    param (
+        $Deployment,
+        $Tree,
+        $FollowOnTree
+    )
+
+    Write-Host "$($Tree)--  ◯ $($Deployment.Name)"
+
+    foreach ($resource in $Deployment.Resources) {
+        $resourceIdParts = $resource.Id.Split('/')
+        Write-Host "$($FollowOnTree)    |-- ◯ $([string]::Join('/', $resourceIdParts[4..($resourceIdParts.Count - 1)]))"
+    }
+
+    $childDeployments = [object[]]::new($Deployment.ChildDeployments.Count)
+    $Deployment.ChildDeployments.CopyTo($childDeployments, 0)
+    $nextTree = $FollowOnTree + "    | "
+    foreach ($deployment in $childDeployments) {
+        $last = $deployment -eq $childDeployments[$childDeployments.Length - 1]
+        if ($last -eq $false) {
+            $followOnTree = $nextTree
+        } else {
+            $followOnTree = $FollowOnTree + "      "
+        }
+        _BuildSimpleTextModel -Tree $nextTree -FollowOnTree $followOnTree -Deployment $deployment
+    }
+}
+
+
 try {
     $context = (Get-AzContext)
     if ($Subscription -eq $true) {
@@ -350,29 +383,35 @@ try {
     }
 
     $uniqueTraceId = ([Guid]::NewGuid()).ToString()
-    $allSpans = (_BuildOpenTelemetryModel -FirstDeploymentTime $null -Deployment $Deployments -TenantId $context.Tenant.Id -TraceId $uniqueTraceId)
+    if ($OutputSimple -eq $true) {
+        _BuildSimpleTextModel -Deployment $Deployments
+    } else {
 
-    $openTelemetryLikeModel = @{
-        data = @(
-            @{
-                traceID   = $uniqueTraceId
-                spans     = $allSpans
-                processes = @{
-                    tmp = @{
-                        serviceName = "template"
-                    }
-                    rsc = @{
-                        serviceName = "resource"
-                    }
-                    prt = @{
-                        serviceName = "parentView"
+        $allSpans = (_BuildOpenTelemetryModel -Deployment $Deployments -TenantId $context.Tenant.Id -TraceId $uniqueTraceId)
+
+        $openTelemetryLikeModel = @{
+            data = @(
+                @{
+                    traceID   = $uniqueTraceId
+                    spans     = $allSpans
+                    processes = @{
+                        tmp = @{
+                            serviceName = "template"
+                        }
+                        rsc = @{
+                            serviceName = "resource"
+                        }
+                        prt = @{
+                            serviceName = "overarching"
+                        }
                     }
                 }
-            }
-        )
+            )
+        }
+
+        ConvertTo-Json -InputObject $openTelemetryLikeModel -Depth 50 | Out-File -FilePath $OutputFile
     }
 
-    ConvertTo-Json -InputObject $openTelemetryLikeModel -Depth 50 | Out-File -FilePath $OutputFile
 
     Write-Host "Written output to $OutputFile"
 
