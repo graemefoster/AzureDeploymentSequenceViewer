@@ -110,7 +110,7 @@ class Sequencer
 
                 yield return await Recurse(
                     firstDeploymentTime,
-                    !isResourceGroupLevel ? operation.Properties.TargetResource.Id.Split('/')[4] : null,
+                    isResourceGroupLevel ? operation.Properties.TargetResource.Id.Split('/')[4] : null,
                     deployment,
                     isResourceGroupLevel
                         ? await GetResourceGroupLevelDeployment(
