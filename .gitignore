@@ -1,2 +1,5 @@
 .vscode/
-
+[Bb]in/
+[Dd]ebug/
+[Oo]bj/
+.idea/
