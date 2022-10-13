@@ -26,6 +26,11 @@ var outputOption = new Option<OutputType>("--output")
     IsRequired = true
 };
 
+var outputFileOption = new Option<string?>("--output-file")
+{
+    IsRequired = false
+};
+
 var rootCommand = new RootCommand("AzureDiagrams");
 
 var subscriptionCommand = new Command("subscription")
@@ -33,21 +38,47 @@ var subscriptionCommand = new Command("subscription")
     tenantIdOption,
     subscriptionIdOption,
     deploymentNameOption,
-    outputOption
+    outputOption,
+    outputFileOption
+};
+
+var resourceGroup = new Command("resource-group")
+{
+    tenantIdOption,
+    subscriptionIdOption,
+    resourceGroupOption,
+    deploymentNameOption,
+    outputOption,
+    outputFileOption
 };
 
 rootCommand.AddCommand(subscriptionCommand);
+rootCommand.AddCommand(resourceGroup);
 
-subscriptionCommand.SetHandler((Guid? tenantId, Guid subscriptionId, string deploymentName, OutputType output) =>
+subscriptionCommand.SetHandler((Guid? tenantId, Guid subscriptionId, string deploymentName, OutputType output, string? outputFile) =>
 {
     Sequencer.SequenceDeployment(
             tenantId,
             subscriptionId,
             deploymentName,
-            output
+            output,
+            outputFile
         )
         .Wait();
-}, tenantIdOption, subscriptionIdOption, deploymentNameOption, outputOption);
+}, tenantIdOption, subscriptionIdOption, deploymentNameOption, outputOption, outputFileOption);
+
+resourceGroup.SetHandler((Guid? tenantId, Guid subscriptionId, string resourceGroupName, string deploymentName, OutputType output, string? outputFile) =>
+{
+    Sequencer.SequenceDeployment(
+            tenantId,
+            subscriptionId,
+            resourceGroupName,
+            deploymentName,
+            output,
+            outputFile
+        )
+        .Wait();
+}, tenantIdOption, subscriptionIdOption, resourceGroupOption, deploymentNameOption, outputOption, outputFileOption);
 
 var parser =
     new CommandLineBuilder(rootCommand)
